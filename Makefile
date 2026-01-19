@@ -16,14 +16,14 @@ inc =
 lib = 
 
 ifeq ($(CMP),intel)
-  FortC = mpiifort
+  FortC = mpiifx
   CFLAG = -fpp -O3 -mcmodel=large -fp-model fast=2 -g#-heap-arrays 20#-ipo -xSSE4.2 -axAVX,CORE-AVX-I,CORE-AVX2
 else ifeq ($(CMP),gcc)
   FortC = mpif90
   CFLAG = -cpp -O3 -Warray-bounds -fbacktrace -g -ffree-line-length-none -mcmodel=large -funroll-loops -floop-optimize
 endif
 
-SrcT   := m_parameters.f90 healpix_types.f90 bit_manipulation.f90 m_Healpix.f90 m_Ray_box.f90 m_readdensity.f90 m_calc_columndens.f90 m_outputs.f90 main.f90
+SrcT   := m_parameters.f90 healpix_types.f90 bit_manipulation.f90 m_Healpix.f90 m_Raytheia.f90 m_readdensity.f90 m_calc_columndens.f90 m_outputs.f90 main.f90
 src:= $(addprefix $(dir), ${SrcT})
 
 all: $(exeName)

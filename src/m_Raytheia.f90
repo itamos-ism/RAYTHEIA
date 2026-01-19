@@ -1,0 +1,601 @@
+!Written by Zhengping Zhu
+module m_Raytheia
+    use MPI
+    use m_parameters
+    use healpix_types
+    implicit none
+    private
+
+    type, public :: box
+        real(RK) :: min(3), max(3)
+    end type box
+
+    type, public :: slab
+        real(RK) :: origin(3),  dir(3),  dir_inv(3) 
+    end type slab
+
+    type, public :: HEALPix_ray
+        integer :: eval
+        real(RK) :: length 
+        real(RK) :: origin(3), angle(2)
+    end type HEALPix_ray
+
+    type, public :: amr_node
+        type(box) :: bbox
+        real :: avg_rho
+        integer :: child(0:7)
+    end type amr_node
+    type(amr_node), public, allocatable :: tree(:)
+    integer, public :: n_nodes
+
+    integer,public :: levels
+    integer,public,allocatable :: maxpoints_ray(:)
+    type(box),public :: box1
+    type(HEALPix_ray),public :: ray
+    real(kind=dp),public :: thfpix, phfpix, contribution
+    real(kind=dp),public :: corner_min(3), corner_max(3)
+
+    real(RK), parameter :: REFINE_CRITERIA = 1.D0 ! Refine criteria：if max number < 1, merge
+    real(RK), parameter :: UNIFORM_CRITERIA = 0.01_RK ! Uniform criteria: if (Max - Min) / Max < 1%, merge
+
+    ! Linear octree data structure for AMR
+    integer(i8b), public, allocatable :: LinearCodes(:)    ! Store Morton Codes (64-bit)
+    integer,      public, allocatable :: LinearLevels(:)   ! Store the level of the grid cell in the octree
+    real(RK),     public, allocatable :: LinearDensity(:)  ! Store density
+    integer,      public :: n_linear_leaves, n_linear_leaves_max, n_linear_leaves_total ! The number of leave nodes
+    integer, allocatable, public :: n_linear_leaves_all(:)
+    
+    integer, public :: max_tree_level                      ! Max depth of the Octree
+
+    public:: intersections, box_avg_density, raytheia_sm, build_tree, raytheia_amr
+    public:: DecodeMorton3D, BuildLinearOctree
+contains
+    logical function isfinite(x)
+            real(RK), intent(in) :: x
+            isfinite = (abs(x) < huge(x) .and. x == x) 
+    end function isfinite
+
+    subroutine split_box(parent, children)
+    implicit none
+    type(box),intent(in) :: parent
+    type(box),intent(out) :: children(0:7)
+    real(RK) :: mid(3)
+    integer :: i, d
+
+    mid = (parent%min + parent%max) / 2.D0
+
+    do i = 0, 7
+        do d = 1, 3
+            if (btest(i, d-1)) then
+                children(i)%min(d) = mid(d)
+                children(i)%max(d) = parent%max(d)
+            else
+                children(i)%min(d) = parent%min(d)
+                children(i)%max(d) = mid(d)
+            endif
+        enddo
+    enddo
+
+    end subroutine split_box
+
+    subroutine intersections(ray_xyz, box_in, length)
+    implicit none
+    type(slab), intent(in) :: ray_xyz
+    type(box), intent(in) :: box_in
+    real(RK), intent(inout) :: length
+    integer :: i, d
+    real(RK) :: tmin, tmax, t1, t2
+    real(RK) :: Pmin(3), Pmax(3)
+    real(RK) :: distance, diff
+    real(RK) :: temp
+
+    ! 初始化 tmin 和 tmax
+    tmin = 0.0
+    tmax = huge(0.0)  ! 设置 tmax 为无穷大
+
+    ! 遍历 x, y, z 三个维度
+    do d = 1, 3
+        if (isfinite(ray_xyz%dir_inv(d))) then
+            ! 计算 t1 和 t2
+            t1 = (box_in%min(d) - ray_xyz%origin(d)) * ray_xyz%dir_inv(d)
+            t2 = (box_in%max(d) - ray_xyz%origin(d)) * ray_xyz%dir_inv(d)
+
+            ! 确保 t1 是较小值，t2 是较大值
+            if (t1 > t2) then
+                temp = t1
+                t1 = t2
+                t2 = temp
+            end if
+
+            ! 更新 tmin 和 tmax
+            tmin = max(tmin, t1)
+            tmax = min(tmax, t2)
+        else if (ray_xyz%origin(d) < box_in%min(d) .or. ray_xyz%origin(d) > box_in%max(d)) then
+            ! 射线与某个维度的边界盒平行且射线起点不在盒子内
+            tmin = huge(0.0)
+            exit
+        end if
+    end do
+
+    ! 判断射线是否与盒子相交
+    if (tmin <= tmax) then
+        ! 计算交点坐标
+        do d = 1, 3
+            Pmin(d) = ray_xyz%origin(d) + tmin / ray_xyz%dir_inv(d)
+            Pmax(d) = ray_xyz%origin(d) + tmax / ray_xyz%dir_inv(d)
+        end do
+
+        ! 计算欧几里得距离
+        distance = 0.0
+        do d = 1, 3
+            diff = Pmax(d) - Pmin(d)
+            distance = distance + diff**2
+        end do
+        length = sqrt(distance)  ! 射线穿过盒子的欧几里得距离
+    else
+        length = 0.0  ! 如果不相交，长度为 0
+    end if
+
+    end subroutine intersections
+
+    recursive subroutine raytheia_sm(ray, parent, level, pid, pjd, pkd, epray, projected, plength) ! save memory
+        type(HEALPix_ray), intent(in) :: ray
+        type(slab) :: ray_xyz
+        type(box), intent(in) :: parent
+        type(box) :: children(0:7)
+        integer, intent(in) :: level, pid, pjd, pkd
+        integer :: epray
+        integer :: projected(0:maxpoints,3)
+        real(RK) :: plength(0:maxpoints)
+        integer :: i, j, k, II, JJ, KK, d, m, parent_index, ir, node_count, start_index, cI, id
+        real(RK) :: mid(3), extent(3), center(3)
+        logical :: intersect
+        real(RK) :: x, y, z, r, xnode, ynode, znode
+!        real(RK) :: Aij,c,nu,pc2cm,f,g_i,g_j,thfpix,phfpix,length
+        real(RK) :: thfpix,phfpix,length
+
+        if (level > 0) then
+            ray_xyz%origin = ray%origin
+            thfpix = ray%angle(1)
+            phfpix = ray%angle(2)
+            ray_xyz%dir(1) = sin(thfpix)*cos(phfpix)
+            ray_xyz%dir(2) = sin(thfpix)*sin(phfpix)
+            ray_xyz%dir(3) = cos(thfpix)
+            do m = 1, 3
+                if (abs(ray_xyz%dir(m)) > 1.0e-6) then
+                    ray_xyz%dir_inv(m) = 1.0 / ray_xyz%dir(m)
+                else
+                    ray_xyz%dir_inv(m) = huge(0.D0)  ! 避免除以零
+                end if
+            end do
+            length = 0.0
+        
+            call intersections(ray_xyz, parent, length)
+
+            intersect = .false.
+            if (length > 0.0) then
+                intersect = .true.
+            endif
+
+            if(intersect) then
+                call split_box(parent, children)
+
+                do i = 0, 7
+                    call raytheia_sm(ray, children(i), level-1, pid, pjd, pkd, epray, projected, plength)
+                enddo
+            endif
+        endif
+
+        ! leaf nodes calculations
+        if(level == 0) then
+
+            II = nint(parent%max(1)/dx)
+            JJ = nint(parent%max(2)/dy)
+            KK = nint(parent%max(3)/dz)
+
+            i=II-pid*nxnp
+            j=JJ-pjd*nynp
+            k=KK-pkd*nznp
+
+            ! penetration length
+            ray_xyz%origin = ray%origin
+            thfpix = ray%angle(1)
+            phfpix = ray%angle(2)
+            ray_xyz%dir(1) = sin(thfpix)*cos(phfpix)
+            ray_xyz%dir(2) = sin(thfpix)*sin(phfpix)
+            ray_xyz%dir(3) = cos(thfpix)
+            do m = 1, 3
+                if (abs(ray_xyz%dir(m)) > 1.0e-6) then
+                    ray_xyz%dir_inv(m) = 1.0 / ray_xyz%dir(m)
+                else
+                    ray_xyz%dir_inv(m) = huge(0.D0)  ! 避免除以零
+                end if
+            end do
+            length = 0.0
+        
+            call intersections(ray_xyz, parent, length)
+            if(length.ne.0.D0) then
+                epray = epray + 1
+                id = epray
+                projected(id,1) = i
+                projected(id,2) = j
+                projected(id,3) = k
+                plength(id) = length
+            endif
+
+        endif
+
+    end subroutine raytheia_sm
+
+!###############################
+!         AMR routines         !
+!###############################
+
+    subroutine box_avg_density(box_in, pid, pjd, pkd, rho, avg_rho, min_rho, max_rho)
+    implicit none
+        type(box),intent(in) :: box_in
+        integer, intent(in) :: pid, pjd, pkd
+        real, intent(in) :: rho(:,:,:)
+        real(RK), intent(out) :: avg_rho
+        real(RK), intent(out), optional :: min_rho, max_rho 
+
+        integer :: i1, i2, j1, j2, k1, k2 !local indices
+        integer :: ig1, ig2, jg1, jg2, kg1, kg2 ! global indices
+        real(RK) :: vol, total_rho
+        real(RK) :: local_min, local_max, val
+        integer :: i, j, k
+
+        ig1 = nint(box_in%min(1)/dx) + 1
+        ig2 = nint(box_in%max(1)/dx)
+        jg1 = nint(box_in%min(2)/dy) + 1
+        jg2 = nint(box_in%max(2)/dy)
+        kg1 = nint(box_in%min(3)/dz) + 1
+        kg2 = nint(box_in%max(3)/dz)
+
+        i1 = ig1 - pid * nxnp
+        i2 = ig2 - pid * nxnp
+        j1 = jg1 - pjd * nynp
+        j2 = jg2 - pjd * nynp
+        k1 = kg1 - pkd * nznp
+        k2 = kg2 - pkd * nznp
+
+        ! boundary protection
+        if (i1 < 1) i1 = 1
+        if (j1 < 1) j1 = 1
+        if (k1 < 1) k1 = 1
+        if (i2 > nxnp) i2 = nxnp
+        if (j2 > nynp) j2 = nynp
+        if (k2 > nznp) k2 = nznp
+
+        total_rho = 0.0_RK
+        local_min = huge(0.0_RK)
+        local_max = -huge(0.0_RK)
+        if (i2 >= i1 .and. j2 >= j1 .and. k2 >= k1) then
+            if (present(min_rho) .or. present(max_rho)) then
+                do k = k1, k2
+                do j = j1, j2
+                do i = i1, i2
+                    val = rho(i,j,k)
+                    total_rho = total_rho + val
+                    if (val < local_min) local_min = val
+                    if (val > local_max) local_max = val
+                enddo
+                enddo
+                enddo
+            else
+                total_rho = DBLE(sum(rho(i1:i2, j1:j2, k1:k2)))
+            endif
+            vol = DBLE((i2-i1+1) * (j2-j1+1) * (k2-k1+1))
+            if (vol > 0.0_RK) then
+                avg_rho = total_rho / vol
+            else
+                avg_rho = 0.0_RK
+            endif
+        else
+            ! 越界或无效区域处理：不要 STOP，而是返回真空 (0)
+            ! 这在构建八叉树的边界填充（Padding）时非常常见
+            avg_rho = 0.0_RK
+            local_min = 0.0_RK
+            local_max = 0.0_RK          
+        endif
+
+        ! 输出可选参数
+        if (present(min_rho)) min_rho = local_min
+        if (present(max_rho)) max_rho = local_max        
+ 
+    end subroutine box_avg_density
+
+    subroutine build_tree(parent_box, pid, pjd, pkd, level, rho)
+        type(box), intent(in) :: parent_box
+        real, intent(in) :: rho(:,:,:)
+        integer, intent(in) :: pid, pjd, pkd, level
+
+        integer :: root_id
+
+        n_nodes = 0
+        call add_node(parent_box, pid, pjd, pkd, level, rho, root_id)
+        ! print*,nrank,'n_nodes',n_nodes
+
+    end subroutine build_tree
+
+    recursive subroutine add_node(current_box, pid, pjd, pkd, level, rho, node_id)
+        type(box), intent(in) :: current_box
+        real, intent(in) :: rho(:,:,:)
+        integer, intent(in) :: pid, pjd, pkd, level
+        integer, intent(out) :: node_id
+
+        real(RK) :: avg_rho
+        type(box) :: children(0:7)
+        integer :: i, child_id
+
+        n_nodes = n_nodes + 1
+        if(n_nodes > size(tree)) stop 'AMR tree overflow'
+
+        node_id = n_nodes
+
+        tree(node_id)%bbox = current_box
+        call box_avg_density(current_box, pid, pjd, pkd, rho, avg_rho)
+        tree(node_id)%avg_rho = avg_rho
+
+        if(level > 0 .and. avg_rho >= REFINE_CRITERIA) then
+            call split_box(current_box, children)
+            do i = 0, 7
+                call add_node(children(i), pid, pjd, pkd, level - 1, rho, child_id)
+                tree(node_id)%child(i) = child_id
+            enddo
+        else
+            tree(node_id)%child(:) = -1 ! no more refine
+        endif
+
+    end subroutine add_node
+
+    recursive subroutine raytheia_amr(ray, node_id, rho, integral)
+        type(HEALPix_ray), intent(in) :: ray
+        integer, intent(in) :: node_id
+        real, intent(in) :: rho(:,:,:)
+        real(RK), intent(inout) :: integral
+
+        type(slab) :: ray_xyz
+        integer :: i, m
+        logical :: intersect
+        real(RK) :: thfpix,phfpix,length,avg_rho
+
+        ray_xyz%origin = ray%origin
+        thfpix = ray%angle(1)
+        phfpix = ray%angle(2)
+        ray_xyz%dir(1) = sin(thfpix)*cos(phfpix)
+        ray_xyz%dir(2) = sin(thfpix)*sin(phfpix)
+        ray_xyz%dir(3) = cos(thfpix)
+        do m = 1, 3
+            if (abs(ray_xyz%dir(m)) > 1.0e-6) then
+                ray_xyz%dir_inv(m) = 1.0 / ray_xyz%dir(m)
+            else
+                ray_xyz%dir_inv(m) = huge(0.D0)  ! 避免除以零
+            end if
+        end do
+
+        length = 0.0
+        call intersections(ray_xyz, tree(node_id)%bbox, length)
+        intersect = (length > 0.D0)
+
+        if (.not. intersect) return ! not intersect
+
+        if (tree(node_id)%child(0) == -1) then
+            integral = integral + tree(node_id)%avg_rho * length * pc
+        else
+            do i = 0, 7
+                if (tree(node_id)%child(i) > 0) then
+                    call raytheia_amr(ray, tree(node_id)%child(i), &
+                                        rho, integral)
+                end if
+            end do        
+        end if
+
+    end subroutine raytheia_amr
+
+!###############################
+!         Morton Codes         !
+!###############################
+    ! Morton编码函数 (3D Grid Index (ix, iy, iz) -> Morton)
+    function EncodeMorton3D(ix, iy, iz) result(code)
+        integer, intent(in) :: ix, iy, iz
+        integer(i8b) :: code
+        integer(i8b) :: x, y, z
+
+        x = int(ix, i8b)
+        y = int(iy, i8b)
+        z = int(iz, i8b)
+
+        x = SplitBy3(x)
+        y = SplitBy3(y)
+        z = SplitBy3(z)
+
+        ! bit interleaving: ...zyxzyx
+        code = IOR(IOR(x, ishft(y, 1)), ishft(z, 2))
+    end function EncodeMorton3D
+
+    ! Bit Interleaving (3D -> 1D)
+    function SplitBy3(a) result(r)
+        integer(i8b), intent(in) :: a
+        integer(i8b) :: r
+        integer :: i
+        
+        r = 0_i8b
+        do i = 0, 20
+            if (btest(a, i)) r = ibset(r, i*3)
+        end do
+    end function SplitBy3
+
+    ! Morton解码函数 (Morton -> 3D Grid Index (ix, iy, iz))
+    subroutine DecodeMorton3D(code, ix, iy, iz)
+        integer(i8b), intent(in) :: code
+        integer, intent(out) :: ix, iy, iz
+        integer :: i
+        
+        ix = 0; iy = 0; iz = 0
+        do i = 0, 20
+            if (btest(code, i*3))   ix = ibset(ix, i)
+            if (btest(code, i*3+1)) iy = ibset(iy, i)
+            if (btest(code, i*3+2)) iz = ibset(iz, i)
+        end do
+    end subroutine DecodeMorton3D
+
+!###############################
+!    Construct Linear Octree   !
+!###############################
+
+    subroutine BuildLinearOctree(amr_var)
+        implicit none
+        real, intent(in) :: amr_var(:,:,:)
+        integer :: max_possible_nodes, max_dim, ierror
+        
+        ! 1. 估算最大节点数 (局部网格大小)
+        max_possible_nodes = nxnp * nynp * nznp
+        print*,max_possible_nodes
+        
+        ! 2. 分配内存 (先按最大分配，后压缩)
+        allocate(LinearCodes(max_possible_nodes))
+        allocate(LinearDensity(max_possible_nodes))
+        allocate(LinearLevels(max_possible_nodes))
+        allocate(n_linear_leaves_all(nproc))
+        
+        n_linear_leaves = 0
+        max_dim = max(nxnp, max(nynp, nznp))
+        max_tree_level = nint(log(real(max_dim))/log(2.0))
+        
+        ! 3. 开始递归构建
+        ! 从局部坐标 (1,1,1) 开始，大小为 max_dim (max_dim 为 2 的幂)
+        ! level 从 0 开始
+        call RecursiveBuild(1, 1, 1, max_dim, 0, amr_var)
+
+        call MPI_AllReduce(n_linear_leaves, n_linear_leaves_max, 1, &
+                           MPI_INTEGER, MPI_MAX, MPI_COMM_WORLD, ierror)
+        call MPI_AllReduce(n_linear_leaves, n_linear_leaves_total, 1, &
+                           MPI_INTEGER, MPI_SUM, MPI_COMM_WORLD, ierror)
+        call MPI_AllGather(n_linear_leaves, 1, MPI_INTEGER, &
+                           n_linear_leaves_all, 1, MPI_INTEGER, &
+                           MPI_COMM_WORLD, ierror)
+
+        if (nrank == 0) then
+            print *, "--- Linear Octree Build Stats ---"
+            print *, "Total Leaves across all CPUs :", n_linear_leaves_total
+            print *, "Max Leaves on single CPU     :", n_linear_leaves_max
+            print *, "Compression Ratio (Global)   :", &
+                     real(n_linear_leaves_total) / real(nxc*nyc*nzc)
+        endif                
+        
+        ! 4. 内存压缩 (Resize)
+        call ResizeArrays()
+        
+    end subroutine BuildLinearOctree
+
+    recursive subroutine RecursiveBuild(gx, gy, gz, max_dim, level, amr_var)
+        integer, intent(in) :: gx, gy, gz, max_dim, level
+        real, intent(in) :: amr_var(:,:,:)
+        
+        real(RK) :: local_min, local_max, local_avg
+        logical :: is_leaf
+        integer :: half_size
+        integer(i8b) :: m_code
+        type(box) :: query_box
+        integer :: global_ix, global_iy, global_iz
+        
+        ! 1. 构造当前 Block 的物理包围盒 (Global Physical Coordinates)
+        ! IID, JID, KID 是 MPI 全局偏移量 
+        ! gx, gy, gz 是 1-based 的局部索引
+        
+        ! 全局MPI区域起始坐标索引 (0-based 用于计算坐标)
+        global_ix = (gx - 1) + IID * nxnp
+        global_iy = (gy - 1) + JID * nynp
+        global_iz = (gz - 1) + KID * nznp
+        
+        ! 计算物理坐标
+        query_box%min(1) = real(global_ix, RK) * dx
+        query_box%min(2) = real(global_iy, RK) * dy
+        query_box%min(3) = real(global_iz, RK) * dz
+        
+        query_box%max(1) = real(global_ix + max_dim, RK) * dx
+        query_box%max(2) = real(global_iy + max_dim, RK) * dy
+        query_box%max(3) = real(global_iz + max_dim, RK) * dz
+        
+        ! 2. 调用现有的 box_avg_density 获取统计信息
+        ! 注意：传入 IID, JID, KID 以便函数内部能映射回局部索引
+        call box_avg_density(query_box, IID, JID, KID, &
+                             amr_var, local_avg, local_min, local_max)
+        
+        ! 3. 决策：是否合并为叶子？
+        is_leaf = .false.
+        
+        if (max_dim == 1) then
+            is_leaf = .true.
+        else 
+            ! 判据 A: 真空合并，不能用avg要用max，因为平均值会被真空稀释
+            if (local_max < REFINE_CRITERIA) then
+                is_leaf = .true.
+            ! 判据 B: 均匀性合并 (如果 Max/Min 差异不大)
+            else
+                if ((local_max - local_min) / local_max < UNIFORM_CRITERIA) then
+                    is_leaf = .true.
+                endif
+            endif
+        endif
+        
+        ! 4. 存储或分裂
+        if (is_leaf) then
+            n_linear_leaves = n_linear_leaves + 1
+            if (n_linear_leaves > size(LinearCodes)) stop "Octree Overflow"
+            
+            ! 这里我们将MPI区域内网格转换为 Morton 码
+            m_code = EncodeMorton3D(gx-1, gy-1, gz-1)
+            
+            LinearCodes(n_linear_leaves)   = m_code
+            LinearDensity(n_linear_leaves) = local_avg
+            LinearLevels(n_linear_leaves)  = level
+            
+        else
+            ! 分裂 (Z-Curve Order 0..7)
+            half_size = max_dim / 2
+            
+            call RecursiveBuild(gx, gy, gz, half_size, level + 1, amr_var)
+            call RecursiveBuild(gx + half_size, gy, gz, half_size, level + 1, amr_var)
+            call RecursiveBuild(gx, gy + half_size, gz, half_size, level + 1, amr_var)
+            call RecursiveBuild(gx + half_size, gy + half_size, gz, half_size, level + 1, amr_var)
+            call RecursiveBuild(gx, gy, gz + half_size, half_size, level + 1, amr_var)
+            call RecursiveBuild(gx + half_size, gy, gz + half_size, half_size, level + 1, amr_var)
+            call RecursiveBuild(gx, gy + half_size, gz + half_size, half_size, level + 1, amr_var)
+            call RecursiveBuild(gx + half_size, gy + half_size, gz + half_size, half_size, level + 1, amr_var)
+        endif
+        
+    end subroutine RecursiveBuild
+
+    subroutine ResizeArrays()
+        integer(i8b), allocatable :: temp_c(:)
+        integer, allocatable :: temp_l(:)
+        real(RK), allocatable :: temp_d(:)
+        
+        allocate(temp_c(n_linear_leaves_max))
+        allocate(temp_l(n_linear_leaves_max))
+        allocate(temp_d(n_linear_leaves_max))
+
+        ! [关键注意] 只拷贝本地有效的数据 (1 : n_linear_leaves)
+        ! 剩下的部分 (n_linear_leaves+1 : n_linear_leaves_max) 是垃圾值或0，不用管
+        if (n_linear_leaves > 0) then
+            temp_c(1:n_linear_leaves) = LinearCodes(1:n_linear_leaves)
+            temp_l(1:n_linear_leaves) = LinearLevels(1:n_linear_leaves)
+            temp_d(1:n_linear_leaves) = LinearDensity(1:n_linear_leaves)
+        endif
+
+        ! 为了安全，可以将多余部分初始化为 0
+        if (n_linear_leaves < n_linear_leaves_max) then
+             temp_c(n_linear_leaves+1:) = 0
+             temp_l(n_linear_leaves+1:) = -1
+             temp_d(n_linear_leaves+1:) = 0.0_RK
+        endif
+        
+        call move_alloc(temp_c, LinearCodes)
+        call move_alloc(temp_l, LinearLevels)
+        call move_alloc(temp_d, LinearDensity)
+    end subroutine ResizeArrays
+
+end module m_Raytheia
+

@@ -3,7 +3,7 @@ module m_calc_columndens
   use omp_lib
   use m_parameters
   use m_Healpix
-  use m_Ray_box
+  use m_Raytheia
   implicit none
 
   public::calc_columndens
