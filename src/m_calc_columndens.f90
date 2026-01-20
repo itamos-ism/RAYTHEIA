@@ -121,8 +121,7 @@ enddo
 
    !locals
    real(RK) :: xc,yc,zc,adaptive_step
-   real(RK) :: single_cd(0:nrays-1)
-   integer :: ip,nUnit
+   integer :: ip
 
    single_cd = 0.D0
    xc=(real(GI,kind=RK)-0.5D0)*dx
@@ -154,13 +153,6 @@ enddo
 ! #ifdef OPENMP
 ! !$OMP END PARALLEL DO
 ! #endif
-
-   open(newunit=nUnit, file=trim(adjustl(outdir))//'/cdMaps.dat', status='replace')
-   do ipix=0,nrays-1
-      call pix2ang_nest(nside,ipix,thfpix,phfpix)
-      write(nUnit,*) thfpix,phfpix,single_cd(ipix)
-   enddo
-   close(nUnit)
 
   end subroutine calc_hammermap
 

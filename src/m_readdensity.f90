@@ -243,6 +243,9 @@ contains
 
     allocate(plength(0:maxpoints))
     allocate(projected(0:maxpoints))
+#ifdef HAMMER
+    allocate(single_cd(0:nrays-1))
+#endif
 
   end subroutine initialization
 

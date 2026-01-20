@@ -29,6 +29,7 @@ module m_parameters
   integer,public,allocatable :: projected(:)
   real(RK),public,allocatable :: plength(:)
   real(RK),public,allocatable :: Aveff(:,:,:)
+  real(RK),public,allocatable :: single_cd(:)
 
   type pdr_node
     real(RK) :: x,y,z

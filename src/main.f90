@@ -40,8 +40,15 @@ program main
   time(2)=MPI_WTIME()
   if(nrank==0) print*,'Elapse time for variables calculation', time(2)-time(1), 'with nodes number',nproc, 'with threads number',nthreads
 
-#ifndef HAMMER
   ! write output
+#ifdef HAMMER
+  open(newunit=nUnit, file=trim(adjustl(outdir))//'/cdMaps.dat', status='replace')
+  do ipix=0,nrays-1
+    call pix2ang_nest(nside,ipix,thfpix,phfpix)
+    write(nUnit,*) thfpix,phfpix,single_cd(ipix)
+  enddo
+  close(nUnit)
+#else
   call writeoutpus
 #endif
 
