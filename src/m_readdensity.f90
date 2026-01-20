@@ -65,7 +65,9 @@ contains
     ! 构建树
     call BuildLinearOctree(real(pdr%rho))
 
-    ! test tree
+    ! ==================================================================
+    ! [Verification] Linear octree test (验证平均密度)
+    ! ==================================================================
     ! block
     !     integer :: i, fid
     !     integer(i8b) :: code
@@ -140,6 +142,82 @@ contains
     ! ! 停止程序以便查看结果，而不是继续跑光线追踪
     ! call MPI_Barrier(MPI_COMM_WORLD, ierror)
     ! stop "Check complete. Inspect output files."
+
+    ! ==================================================================
+    ! [Verification] Diagonality Test (验证对角线积分精度)
+    ! ==================================================================
+    ! block
+    !     type(HEALPix_ray) :: test_ray
+    !     real(RK) :: total_len_local, total_len_global, expected_len
+    !     real(RK) :: dx_domain, dy_domain, dz_domain
+    !     integer :: i, cr
+        
+    !     ! 临时定义 DDA 输出数组 (假设只测试 1 条光线)
+    !     integer :: test_epray(0:nrays-1)
+    !     integer :: test_projected(0:nrays-1,0:maxpoints,3)
+    !     real(RK) :: test_plength(0:nrays-1,0:maxpoints)
+        
+    !     test_ray%origin = [0.0_RK, 0.0_RK, 0.0_RK]
+    !     test_ray%angle(1) = acos(1.0_RK / sqrt(3.0_RK))
+    !     test_ray%angle(2) = 0.785398163397448_RK
+
+    !     do cr=0,nproc-1
+    !       ! 初始化
+    !       box1%min = [DBLE(IID*nxnp)*dx, DBLE(JID*nynp)*dy, DBLE(KID*nznp)*dz]
+    !       box1%max = [DBLE((IID+1)*nxnp)*dx, DBLE((JID+1)*nynp)*dy, DBLE((KID+1)*nznp)*dz]
+    !       test_epray = 0
+    !       test_projected = 0
+    !       test_plength = 0.D0
+          
+    !       ! 2. 调用 DDA 算法
+    !       ! 注意：传入 n_linear_leaves 表示使用当前构建好的本地树
+    !       call RayTheia_Linear_DDA(test_ray, box1, n_linear_leaves, 0, &
+    !                               test_epray, test_projected, test_plength)
+    !     enddo
+
+    !     ! 3. 统计本进程(Rank)内的路径总长
+    !     total_len_local = 0.0_RK
+    !     if (test_epray(0) > 0) then
+    !         do i = 1, test_epray(0)
+    !             total_len_local = total_len_local + test_plength(0, i)
+    !         end do
+    !     endif
+    !     print*, nrank, total_len_local
+
+    !     call MPI_Reduce(total_len_local, total_len_global, 1, &
+    !                     MPI_DOUBLE_PRECISION, MPI_SUM, 0, MPI_COMM_WORLD, ierror)
+        
+    !     ! 5. 输出验证结果 (仅 Rank 0)
+    !     if (nrank == 0) then
+    !         ! 计算理论长度: sqrt(Lx^2 + Ly^2 + Lz^2)
+    !         ! 假设 xlx, yly, zlz 是全局物理尺寸变量
+    !         dx_domain = real(xlx, RK)
+    !         dy_domain = real(yly, RK) ! 如果是立方体可能都是 xlx
+    !         dz_domain = real(zlz, RK)
+    !         expected_len = sqrt(dx_domain**2 + dy_domain**2 + dz_domain**2)
+            
+    !         print *
+    !         print *, "========== DDA Verification =========="
+    !         print *, "Test Ray      : Diagonal (0,0,0) -> (L,L,L)"
+    !         print *, "Total Segments: ", sum(test_epray) ! 此时只统计了Rank0的，若需全局需Reduce epray
+    !         print *, "Computed Len  : ", total_len_global
+    !         print *, "Expected Len  : ", expected_len
+    !         print *, "Abs Error     : ", abs(total_len_global - expected_len)
+    !         print *, "Rel Error     : ", abs(total_len_global - expected_len)/expected_len
+            
+    !         if (abs(total_len_global - expected_len) < 1.0e-3_RK) then
+    !              print *, "Result        : [PASS] Geometry & Integration OK"
+    !         else
+    !              print *, "Result        : [FAIL] Check intersections/EPS/boundary"
+    !         endif
+    !         print *, "======================================"
+    !         print *
+    !     endif
+        
+    !     call MPI_Barrier(MPI_COMM_WORLD, ierror)
+    !     stop
+        
+    ! end block
 
   end subroutine readdensity
 

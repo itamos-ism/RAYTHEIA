@@ -48,7 +48,7 @@ module m_Raytheia
     integer, public :: max_tree_level                      ! Max depth of the Octree
 
     public:: intersections, box_avg_density, raytheia_sm, build_tree, raytheia_amr
-    public:: DecodeMorton3D, BuildLinearOctree
+    public:: DecodeMorton3D, BuildLinearOctree, RayTheia_Linear_DDA
 contains
     logical function isfinite(x)
             real(RK), intent(in) :: x
@@ -78,15 +78,18 @@ contains
 
     end subroutine split_box
 
-    subroutine intersections(ray_xyz, box_in, length)
+    subroutine intersections(ray_xyz, box_in, tmin, tmax, length)
     implicit none
     type(slab), intent(in) :: ray_xyz
     type(box), intent(in) :: box_in
+    real(RK), intent(out) :: tmin, tmax
     real(RK), intent(inout) :: length
-    integer :: i, d
-    real(RK) :: tmin, tmax, t1, t2
+
+    ! locals
+    integer :: d
+    real(RK) :: t1, t2
     real(RK) :: Pmin(3), Pmax(3)
-    real(RK) :: distance, diff
+    real(RK) :: distance
     real(RK) :: temp
 
     ! 初始化 tmin 和 tmax
@@ -117,21 +120,20 @@ contains
         end if
     end do
 
+    ! only can be used when direction is strict unit vector
+    ! if(tmin <= tmax) then
+    !     length = tmax -tmin
+    ! else
+    !     length = 0.D0
+    ! endif
+
     ! 判断射线是否与盒子相交
     if (tmin <= tmax) then
         ! 计算交点坐标
-        do d = 1, 3
-            Pmin(d) = ray_xyz%origin(d) + tmin / ray_xyz%dir_inv(d)
-            Pmax(d) = ray_xyz%origin(d) + tmax / ray_xyz%dir_inv(d)
-        end do
-
-        ! 计算欧几里得距离
-        distance = 0.0
-        do d = 1, 3
-            diff = Pmax(d) - Pmin(d)
-            distance = distance + diff**2
-        end do
-        length = sqrt(distance)  ! 射线穿过盒子的欧几里得距离
+        Pmin = ray_xyz%origin + tmin / ray_xyz%dir_inv
+        Pmax = ray_xyz%origin + tmax / ray_xyz%dir_inv
+        distance = sum((Pmax - Pmin)**2)
+        length = sqrt(distance)
     else
         length = 0.0  ! 如果不相交，长度为 0
     end if
@@ -152,7 +154,7 @@ contains
         logical :: intersect
         real(RK) :: x, y, z, r, xnode, ynode, znode
 !        real(RK) :: Aij,c,nu,pc2cm,f,g_i,g_j,thfpix,phfpix,length
-        real(RK) :: thfpix,phfpix,length
+        real(RK) :: thfpix,phfpix,length,tmin,tmax
 
         if (level > 0) then
             ray_xyz%origin = ray%origin
@@ -170,7 +172,7 @@ contains
             end do
             length = 0.0
         
-            call intersections(ray_xyz, parent, length)
+            call intersections(ray_xyz, parent, tmin, tmax, length)
 
             intersect = .false.
             if (length > 0.0) then
@@ -213,7 +215,7 @@ contains
             end do
             length = 0.0
         
-            call intersections(ray_xyz, parent, length)
+            call intersections(ray_xyz, parent, tmin, tmax, length)
             if(length.ne.0.D0) then
                 epray = epray + 1
                 id = epray
@@ -358,7 +360,7 @@ contains
         type(slab) :: ray_xyz
         integer :: i, m
         logical :: intersect
-        real(RK) :: thfpix,phfpix,length,avg_rho
+        real(RK) :: thfpix,phfpix,length,avg_rho,tmin,tmax
 
         ray_xyz%origin = ray%origin
         thfpix = ray%angle(1)
@@ -375,7 +377,7 @@ contains
         end do
 
         length = 0.0
-        call intersections(ray_xyz, tree(node_id)%bbox, length)
+        call intersections(ray_xyz, tree(node_id)%bbox, tmin, tmax, length)
         intersect = (length > 0.D0)
 
         if (.not. intersect) return ! not intersect
@@ -440,9 +442,9 @@ contains
         end do
     end subroutine DecodeMorton3D
 
-!###############################
-!    Construct Linear Octree   !
-!###############################
+!################################
+!    Construct Linear Octree    !
+!################################
 
     subroutine BuildLinearOctree(amr_var)
         implicit none
@@ -451,7 +453,6 @@ contains
         
         ! 1. 估算最大节点数 (局部网格大小)
         max_possible_nodes = nxnp * nynp * nznp
-        print*,max_possible_nodes
         
         ! 2. 分配内存 (先按最大分配，后压缩)
         allocate(LinearCodes(max_possible_nodes))
@@ -596,6 +597,185 @@ contains
         call move_alloc(temp_l, LinearLevels)
         call move_alloc(temp_d, LinearDensity)
     end subroutine ResizeArrays
+
+!#################################################
+!    DDA ray traversal based on linear octree    !
+!#################################################
+subroutine RayTheia_Linear_DDA(ray, current_box, n_tree_nodes, ipix, epray, projected, plength)
+        implicit none
+        type(HEALPix_ray), intent(in) :: ray
+        type(box), intent(in) :: current_box
+        integer, intent(in) :: n_tree_nodes
+        integer, intent(in) :: ipix
+        integer, intent(out) :: epray(0:nrays-1), projected(0:nrays-1,0:maxpoints,3)
+        real(RK), intent(out) :: plength(0:nrays-1,0:maxpoints)
+
+        ! locals
+        type(slab) :: ray_xyz
+        type(box) :: node_box
+        
+        ! 时间/距离变量
+        real(RK) :: t_curr, t_next
+        real(RK) :: tmin, tmax, length
+        real(RK) :: t_node_min, t_node_max, node_len
+        
+        ! 几何与索引变量
+        real(RK) :: pos(3), local_pos(3)
+        real(RK) :: d_inv(3)
+        integer :: lx, ly, lz, m
+        integer(i8b) :: search_code
+        integer :: idx, lvl
+        
+        ! 记录辅助
+        integer :: node_lx, node_ly, node_lz, node_grid_size
+        integer :: id
+        real(RK), parameter :: EPS = 1.0e-5_RK
+
+        ! ---------------------------------------------------
+        ! 1. 初始化射线 Slab 几何
+        ! ---------------------------------------------------
+        ray_xyz%origin = ray%origin
+        ray_xyz%dir(1) = sin(ray%angle(1)) * cos(ray%angle(2))
+        ray_xyz%dir(2) = sin(ray%angle(1)) * sin(ray%angle(2))
+        ray_xyz%dir(3) = cos(ray%angle(1))
+        do m = 1, 3
+            if (abs(ray_xyz%dir(m)) > 1.0e-6) then
+                ray_xyz%dir_inv(m) = 1.0 / ray_xyz%dir(m)
+            else
+                ray_xyz%dir_inv(m) = huge(0.D0)  ! 避免除以零
+            end if
+        end do
+        
+        ! ---------------------------------------------------
+        ! 2. [MPI核心] 确定光线在当前进程区域 (current_box) 的进出点
+        ! ---------------------------------------------------
+        ! 我们只关心光线在 current_box 内部的这一段
+        length = 0.0
+        call intersections(ray_xyz, current_box, tmin, tmax, length)
+        if(length <= 0.D0 .or. tmax < 0.D0) return
+        
+        ! 初始化追踪起点 t_curr
+        ! 如果光线起点在 current_box 内部，则从 t_curr = 0 开始追踪
+        ! 如果光线起点在 current_box 外部，则从进入点 t_curr = tmin 开始追踪
+        t_curr = max(tmin, 0.D0)
+        t_curr = t_curr + EPS
+
+        ! ---------------------------------------------------
+        ! 3. DDA 步进循环 (仅在 current_box 范围内)
+        ! ---------------------------------------------------
+        do while (t_curr < tmax)
+            
+            ! A. 计算 全局物理位置 P_global
+            pos = ray_xyz%origin + t_curr * ray_xyz%dir
+            
+            ! B. [MPI关键] 转换为 局部逻辑坐标 (Local Logical Coord)
+            ! 全局位置 - 本进程左下角坐标 = 本进程内的相对偏移
+            local_pos = (pos - current_box%min)
+            
+            ! 转换为 Grid Index (0-based)
+            lx = floor(local_pos(1) / dx)
+            ly = floor(local_pos(2) / dy)
+            lz = floor(local_pos(3) / dz)
+            
+            ! 边界截断保护 (Clamp)
+            ! 防止 EPS 误差导致坐标变成 -1
+            if (lx < 0) lx = 0
+            if (ly < 0) ly = 0
+            if (lz < 0) lz = 0
+            ! 注意：不用检查上限，因为我们限制在 t_domain_exit 内，
+            ! 且 EncodeMorton/FindLeafIndex 会处理找不到的情况
+            
+            ! C. 生成局部 Morton 码并查表
+            search_code = EncodeMorton3D(lx, ly, lz)
+            call FindLeafIndex(search_code, n_tree_nodes, idx)
+            
+            if (idx > 0) then
+                ! === 命中局部AMR节点 ===
+                ! D. 构建该节点的 全局物理包围盒 (node_box)
+                lvl = LinearLevels(idx)
+                call DecodeMorton3D(LinearCodes(idx), node_lx, node_ly, node_lz)
+                ! 1. 计算节点大小 (物理单位)
+                node_grid_size = ishft(1, max_tree_level - lvl) 
+                
+                ! 2. 映射回全局物理坐标:
+                ! Global_Node_Min = Box1_Min (MPI偏移) + Local_Offset * dx
+                node_box%min(1) = current_box%min(1) + real(node_lx, RK) * dx
+                node_box%min(2) = current_box%min(2) + real(node_ly, RK) * dy
+                node_box%min(3) = current_box%min(3) + real(node_lz, RK) * dz
+                
+                node_box%max(1) = node_box%min(1) + real(node_grid_size, RK) * dx
+                node_box%max(2) = node_box%min(2) + real(node_grid_size, RK) * dy
+                node_box%max(3) = node_box%min(3) + real(node_grid_size, RK) * dz
+                
+                ! E. 计算光线穿出该节点的时间 (t_node_max)
+                ! 注意：intersections 是纯几何运算，支持全局坐标
+                call intersections(ray_xyz, node_box, t_node_min, t_node_max, node_len)
+                
+                ! 确定下一步位置
+                ! 正常情况：t_next = t_node_max
+                if (t_node_max > t_curr) then
+                    t_next = t_node_max
+                else
+                    ! 容错：如果计算出的出口比当前还小（浮点误差），强制推进一步
+                    t_next = t_curr + min(dx, min(dy, dz))
+                end if
+                
+                ! F. 记录
+                epray(ipix) = epray(ipix) + 1
+                id = epray(ipix)
+                projected(ipix,id,1) = idx
+                plength(ipix, id) = node_len             
+                
+                ! G. 推进
+                t_curr = t_next
+                
+            else
+                ! === 未找到节点 (异常或Padding外溢) ===
+                ! 在 MPI 边界处，八叉树可能为了补齐 2^N 而比 current_box 稍微大一点，
+                ! 或者光线刚好处在 current_box 边缘。
+                ! 动作：推进一步，尝试重新定位
+                t_curr = t_curr + min(dx, min(dy, dz))
+            endif
+            
+            ! H. 跨越边界
+            t_curr = t_curr + EPS
+            
+        end do
+        
+    end subroutine RayTheia_Linear_DDA
+    
+    ! Binary search leaf nodes
+    subroutine FindLeafIndex(key, n_search_size, idx)
+        integer(i8b), intent(in) :: key
+        integer, intent(in) :: n_search_size
+        integer, intent(out) :: idx
+
+        ! locals
+        integer :: left, right, mid
+        integer(i8b) :: code_mid
+        
+        idx = -1
+        if (n_search_size == 0) return
+        
+        left = 1
+        right = n_search_size
+        
+        ! 查找满足 LinearCodes(i) <= key 的最大索引
+        do while (left <= right)
+            mid = (left + right) / 2
+            code_mid = LinearCodes(mid)
+            if (code_mid <= key) then
+                idx = mid
+                left = mid + 1
+            else
+                right = mid - 1
+            end if
+        end do
+    end subroutine FindLeafIndex
+
+!####################################################
+!    Maximum number of penetrate AMR grid cells     !
+!####################################################
 
 end module m_Raytheia
 
