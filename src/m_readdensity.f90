@@ -58,7 +58,6 @@ contains
       write(6,*) 'Domain size        = ',real(xlx)
     endif
 
-    levels = nint(log(DBLE(nxnp)) / log(2.D0)) + 1
     maxpoints = 500
     if(nrank.eq.0) print*,'Maxpoints          = ',maxpoints
 
@@ -242,16 +241,8 @@ contains
     enddo
     enddo
 
-#ifdef AMR
-    max_nodes = (8**(levels) - 1) / 7
-    allocate(tree(max_nodes))
-    allocate(plength(0:maxpoints))
-    allocate(projected(0:maxpoints,3))    
-    ! print*,nrank,levels,max_nodes
-#else
     allocate(plength(0:maxpoints))
     allocate(projected(0:maxpoints,3))
-#endif
 
   end subroutine initialization
 

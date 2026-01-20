@@ -1,13 +1,8 @@
 CMP     = intel
 OPENMP  = 1
-AMR     = 1
 
 ifeq ($(OPENMP),1)
   DEFS_ADD += -DOPENMP
-endif
-
-ifeq ($(AMR),1)
-  DEFS_ADD += -DAMR
 endif
 
 exeName =  cd

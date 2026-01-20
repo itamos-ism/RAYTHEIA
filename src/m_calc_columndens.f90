@@ -9,19 +9,20 @@ module m_calc_columndens
   public::calc_columndens
 contains
 
-  subroutine calc_columndens
-    implicit none
+subroutine calc_columndens
+   implicit none
 
-    !locals
-    real(RK) :: xc,yc,zc,AV_fac,cd,adaptive_step,gamma
-    real, allocatable :: remote_rho(:,:,:)
-    integer :: cr,sI,sJ,sK,cIID,cJID,cKID,sII,sJJ,sKK,ip,nUnit,ierror
+   !locals
+   real(RK) :: xc,yc,zc,AV_fac,cd,adaptive_step,gamma
+   integer :: cr,sI,sJ,sK,cIID,cJID,cKID,sII,sJJ,sKK,ip,nUnit,ierror
+   integer(i8b) :: temp_codes(n_linear_leaves_max)
+   integer :: temp_levels(n_linear_leaves_max)
+   real(RK) :: temp_density(n_linear_leaves_max)
 
-    allocate(remote_rho(nxnp,nynp,nznp))
 
-Aveff = 0.D0
-AV_fac = 6.29e-22
-gamma = 3.02D0
+   Aveff = 0.D0
+   AV_fac = 6.29e-22
+   gamma = 3.02D0
 
 #ifdef OPENMP
 !$OMP PARALLEL DO COLLAPSE(3)
@@ -42,27 +43,15 @@ do cr=0,nproc-1
    cJID = (cr - cKID * npx * npy) / npx
    cIID =  cr - cKID * npx * npy - cJID * npx
 
-#ifdef OPENMP
-!$OMP PARALLEL DO COLLAPSE(3)
-#endif
-   do sK = 1,nznp
-   do sJ = 1,nynp
-   do sI = 1,nxnp
-      remote_rho(sI,sJ,sK) = REAL(pdr(sI,sJ,sK)%rho)
-   enddo
-   enddo
-   enddo
-#ifdef OPENMP
-!$OMP END PARALLEL DO
-#endif
-
-   call MPI_BCAST(remote_rho,nxnp*nynp*nznp,MPI_REAL,cr,MPI_COMM_WORLD,ierror)
-
-#ifdef AMR
-   box1%min = [DBLE(cIID*nxnp)*dx, DBLE(cJID*nynp)*dy, DBLE(cKID*nznp)*dz]
-   box1%max = [DBLE((cIID+1)*nxnp)*dx, DBLE((cJID+1)*nynp)*dy, DBLE((cKID+1)*nznp)*dz]
-   call build_tree(box1, cIID, cJID, cKID, levels-1, real(remote_rho))
-#endif
+   temp_codes = LinearCodes
+   temp_levels = LinearLevels
+   temp_density = LinearDensity
+   call MPI_Bcast(temp_codes, n_linear_leaves_all(cr), MPI_INTEGER8, &
+                   cr, MPI_COMM_WORLD, ierror)
+   call MPI_Bcast(temp_levels, n_linear_leaves_all(cr), MPI_INTEGER, &
+                   cr, MPI_COMM_WORLD, ierror)
+   call MPI_Bcast(temp_density, n_linear_leaves_all(cr), MPI_DOUBLE_PRECISION, &
+                   cr, MPI_COMM_WORLD, ierror)
 
 #ifdef OPENMP
 !$OMP PARALLEL DO COLLAPSE(3) DEFAULT(SHARED) PRIVATE(sII,sJJ,sKK,xc,yc,zc,adaptive_step) &
@@ -89,20 +78,15 @@ do cr=0,nproc-1
          call pix2ang_nest(nside, ipix, thfpix, phfpix)
          ray%origin = [xc, yc, zc]
          ray%angle = [thfpix, phfpix]
-#ifdef AMR
-         cd = 0.D0
-         call raytheia_amr(ray, 1, remote_rho, cd)
-         pdr(sI,sJ,sK)%cd(ipix) = pdr(sI,sJ,sK)%cd(ipix) + cd
-#else 
-         call raytheia_sm(ray, box1, levels-1, cIID, cJID, cKID, epray, projected, plength)
+         call RayTheia_Linear_DDA(ray, box1, n_linear_leaves_all(cr), temp_codes, temp_levels, ipix, &
+                                  epray, projected, plength)
          IF (epray.GT.0) THEN
             do ip=1,epray
                adaptive_step = plength(ip)
                pdr(sI,sJ,sK)%cd(ipix) = pdr(sI,sJ,sK)%cd(ipix) + &
-               &DBLE(remote_rho(projected(ip,1),projected(ip,2),projected(ip,3)))*adaptive_step*pc
+               &DBLE(temp_density(projected(ip,1)))*adaptive_step*pc
             enddo
-         ENDIF
-#endif
+         ENDIF         
       enddo
    enddo
    enddo

@@ -20,21 +20,9 @@ module m_Raytheia
         real(RK) :: origin(3), angle(2)
     end type HEALPix_ray
 
-    type, public :: amr_node
-        type(box) :: bbox
-        real :: avg_rho
-        integer :: child(0:7)
-    end type amr_node
-    type(amr_node), public, allocatable :: tree(:)
-    integer, public :: n_nodes
-
-    integer,public :: levels
-    integer,public,allocatable :: maxpoints_ray(:)
     type(box),public :: box1
     type(HEALPix_ray),public :: ray
     real(kind=dp),public :: thfpix, phfpix, contribution
-    real(kind=dp),public :: corner_min(3), corner_max(3)
-
     real(RK), parameter :: REFINE_CRITERIA = 1.D0 ! Refine criteria：if max number < 1, merge
     real(RK), parameter :: UNIFORM_CRITERIA = 0.01_RK ! Uniform criteria: if (Max - Min) / Max < 1%, merge
 
@@ -44,39 +32,19 @@ module m_Raytheia
     real(RK),     public, allocatable :: LinearDensity(:)  ! Store density
     integer,      public :: n_linear_leaves, n_linear_leaves_max, n_linear_leaves_total ! The number of leave nodes
     integer, allocatable, public :: n_linear_leaves_all(:)
-    
     integer, public :: max_tree_level                      ! Max depth of the Octree
 
-    public:: intersections, box_avg_density, raytheia_sm, build_tree, raytheia_amr
-    public:: DecodeMorton3D, BuildLinearOctree, RayTheia_Linear_DDA
+    public:: BuildLinearOctree, RayTheia_Linear_DDA
 contains
+
+!###############################
+!       Basic functions        !
+!###############################
+
     logical function isfinite(x)
             real(RK), intent(in) :: x
             isfinite = (abs(x) < huge(x) .and. x == x) 
     end function isfinite
-
-    subroutine split_box(parent, children)
-    implicit none
-    type(box),intent(in) :: parent
-    type(box),intent(out) :: children(0:7)
-    real(RK) :: mid(3)
-    integer :: i, d
-
-    mid = (parent%min + parent%max) / 2.D0
-
-    do i = 0, 7
-        do d = 1, 3
-            if (btest(i, d-1)) then
-                children(i)%min(d) = mid(d)
-                children(i)%max(d) = parent%max(d)
-            else
-                children(i)%min(d) = parent%min(d)
-                children(i)%max(d) = mid(d)
-            endif
-        enddo
-    enddo
-
-    end subroutine split_box
 
     subroutine intersections(ray_xyz, box_in, tmin, tmax, length)
     implicit none
@@ -139,99 +107,6 @@ contains
     end if
 
     end subroutine intersections
-
-    recursive subroutine raytheia_sm(ray, parent, level, pid, pjd, pkd, epray, projected, plength) ! save memory
-        type(HEALPix_ray), intent(in) :: ray
-        type(slab) :: ray_xyz
-        type(box), intent(in) :: parent
-        type(box) :: children(0:7)
-        integer, intent(in) :: level, pid, pjd, pkd
-        integer :: epray
-        integer :: projected(0:maxpoints,3)
-        real(RK) :: plength(0:maxpoints)
-        integer :: i, j, k, II, JJ, KK, d, m, parent_index, ir, node_count, start_index, cI, id
-        real(RK) :: mid(3), extent(3), center(3)
-        logical :: intersect
-        real(RK) :: x, y, z, r, xnode, ynode, znode
-!        real(RK) :: Aij,c,nu,pc2cm,f,g_i,g_j,thfpix,phfpix,length
-        real(RK) :: thfpix,phfpix,length,tmin,tmax
-
-        if (level > 0) then
-            ray_xyz%origin = ray%origin
-            thfpix = ray%angle(1)
-            phfpix = ray%angle(2)
-            ray_xyz%dir(1) = sin(thfpix)*cos(phfpix)
-            ray_xyz%dir(2) = sin(thfpix)*sin(phfpix)
-            ray_xyz%dir(3) = cos(thfpix)
-            do m = 1, 3
-                if (abs(ray_xyz%dir(m)) > 1.0e-6) then
-                    ray_xyz%dir_inv(m) = 1.0 / ray_xyz%dir(m)
-                else
-                    ray_xyz%dir_inv(m) = huge(0.D0)  ! 避免除以零
-                end if
-            end do
-            length = 0.0
-        
-            call intersections(ray_xyz, parent, tmin, tmax, length)
-
-            intersect = .false.
-            if (length > 0.0) then
-                intersect = .true.
-            endif
-
-            if(intersect) then
-                call split_box(parent, children)
-
-                do i = 0, 7
-                    call raytheia_sm(ray, children(i), level-1, pid, pjd, pkd, epray, projected, plength)
-                enddo
-            endif
-        endif
-
-        ! leaf nodes calculations
-        if(level == 0) then
-
-            II = nint(parent%max(1)/dx)
-            JJ = nint(parent%max(2)/dy)
-            KK = nint(parent%max(3)/dz)
-
-            i=II-pid*nxnp
-            j=JJ-pjd*nynp
-            k=KK-pkd*nznp
-
-            ! penetration length
-            ray_xyz%origin = ray%origin
-            thfpix = ray%angle(1)
-            phfpix = ray%angle(2)
-            ray_xyz%dir(1) = sin(thfpix)*cos(phfpix)
-            ray_xyz%dir(2) = sin(thfpix)*sin(phfpix)
-            ray_xyz%dir(3) = cos(thfpix)
-            do m = 1, 3
-                if (abs(ray_xyz%dir(m)) > 1.0e-6) then
-                    ray_xyz%dir_inv(m) = 1.0 / ray_xyz%dir(m)
-                else
-                    ray_xyz%dir_inv(m) = huge(0.D0)  ! 避免除以零
-                end if
-            end do
-            length = 0.0
-        
-            call intersections(ray_xyz, parent, tmin, tmax, length)
-            if(length.ne.0.D0) then
-                epray = epray + 1
-                id = epray
-                projected(id,1) = i
-                projected(id,2) = j
-                projected(id,3) = k
-                plength(id) = length
-            endif
-
-        endif
-
-    end subroutine raytheia_sm
-
-!###############################
-!         AMR routines         !
-!###############################
 
     subroutine box_avg_density(box_in, pid, pjd, pkd, rho, avg_rho, min_rho, max_rho)
     implicit none
@@ -307,97 +182,10 @@ contains
  
     end subroutine box_avg_density
 
-    subroutine build_tree(parent_box, pid, pjd, pkd, level, rho)
-        type(box), intent(in) :: parent_box
-        real, intent(in) :: rho(:,:,:)
-        integer, intent(in) :: pid, pjd, pkd, level
-
-        integer :: root_id
-
-        n_nodes = 0
-        call add_node(parent_box, pid, pjd, pkd, level, rho, root_id)
-        ! print*,nrank,'n_nodes',n_nodes
-
-    end subroutine build_tree
-
-    recursive subroutine add_node(current_box, pid, pjd, pkd, level, rho, node_id)
-        type(box), intent(in) :: current_box
-        real, intent(in) :: rho(:,:,:)
-        integer, intent(in) :: pid, pjd, pkd, level
-        integer, intent(out) :: node_id
-
-        real(RK) :: avg_rho
-        type(box) :: children(0:7)
-        integer :: i, child_id
-
-        n_nodes = n_nodes + 1
-        if(n_nodes > size(tree)) stop 'AMR tree overflow'
-
-        node_id = n_nodes
-
-        tree(node_id)%bbox = current_box
-        call box_avg_density(current_box, pid, pjd, pkd, rho, avg_rho)
-        tree(node_id)%avg_rho = avg_rho
-
-        if(level > 0 .and. avg_rho >= REFINE_CRITERIA) then
-            call split_box(current_box, children)
-            do i = 0, 7
-                call add_node(children(i), pid, pjd, pkd, level - 1, rho, child_id)
-                tree(node_id)%child(i) = child_id
-            enddo
-        else
-            tree(node_id)%child(:) = -1 ! no more refine
-        endif
-
-    end subroutine add_node
-
-    recursive subroutine raytheia_amr(ray, node_id, rho, integral)
-        type(HEALPix_ray), intent(in) :: ray
-        integer, intent(in) :: node_id
-        real, intent(in) :: rho(:,:,:)
-        real(RK), intent(inout) :: integral
-
-        type(slab) :: ray_xyz
-        integer :: i, m
-        logical :: intersect
-        real(RK) :: thfpix,phfpix,length,avg_rho,tmin,tmax
-
-        ray_xyz%origin = ray%origin
-        thfpix = ray%angle(1)
-        phfpix = ray%angle(2)
-        ray_xyz%dir(1) = sin(thfpix)*cos(phfpix)
-        ray_xyz%dir(2) = sin(thfpix)*sin(phfpix)
-        ray_xyz%dir(3) = cos(thfpix)
-        do m = 1, 3
-            if (abs(ray_xyz%dir(m)) > 1.0e-6) then
-                ray_xyz%dir_inv(m) = 1.0 / ray_xyz%dir(m)
-            else
-                ray_xyz%dir_inv(m) = huge(0.D0)  ! 避免除以零
-            end if
-        end do
-
-        length = 0.0
-        call intersections(ray_xyz, tree(node_id)%bbox, tmin, tmax, length)
-        intersect = (length > 0.D0)
-
-        if (.not. intersect) return ! not intersect
-
-        if (tree(node_id)%child(0) == -1) then
-            integral = integral + tree(node_id)%avg_rho * length * pc
-        else
-            do i = 0, 7
-                if (tree(node_id)%child(i) > 0) then
-                    call raytheia_amr(ray, tree(node_id)%child(i), &
-                                        rho, integral)
-                end if
-            end do        
-        end if
-
-    end subroutine raytheia_amr
-
 !###############################
 !         Morton Codes         !
 !###############################
+
     ! Morton编码函数 (3D Grid Index (ix, iy, iz) -> Morton)
     function EncodeMorton3D(ix, iy, iz) result(code)
         integer, intent(in) :: ix, iy, iz
@@ -776,10 +564,6 @@ subroutine RayTheia_Linear_DDA(ray, current_box, n_tree_nodes, temp_codes, temp_
             end if
         end do
     end subroutine FindLeafIndex
-
-!####################################################
-!    Maximum number of penetrate AMR grid cells     !
-!####################################################
 
 end module m_Raytheia
 
