@@ -26,7 +26,7 @@ module m_parameters
   integer,public :: level,nrays,nside,ipix
   integer,public :: maxpoints
   integer,public :: epray
-  integer,public,allocatable :: projected(:,:)
+  integer,public,allocatable :: projected(:)
   real(RK),public,allocatable :: plength(:)
   real(RK),public,allocatable :: Aveff(:,:,:)
 

@@ -153,7 +153,7 @@ contains
         
     !     ! 临时定义 DDA 输出数组 (假设只测试 1 条光线)
     !     integer :: test_epray
-    !     integer :: test_projected(0:maxpoints,3)
+    !     integer :: test_projected(0:maxpoints)
     !     real(RK) :: test_plength(0:maxpoints)
     !     integer(i8b) :: temp_codes(n_linear_leaves_max)
     !     integer :: temp_levels(n_linear_leaves_max)
@@ -242,7 +242,7 @@ contains
     enddo
 
     allocate(plength(0:maxpoints))
-    allocate(projected(0:maxpoints,3))
+    allocate(projected(0:maxpoints))
 
   end subroutine initialization
 

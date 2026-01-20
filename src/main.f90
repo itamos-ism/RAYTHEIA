@@ -27,13 +27,23 @@ program main
   ! Calculate columndensity
   time(1)=MPI_WTIME()
 
+#ifdef HAMMER
+  if(nproc.eq.1) then
+    call calc_hammermap(nxc/2,nyc/2,nzc/2)
+  else
+    stop "Error: hammermap only for OpenMP"
+  endif 
+#else
   call calc_columndens
+#endif
 
   time(2)=MPI_WTIME()
   if(nrank==0) print*,'Elapse time for variables calculation', time(2)-time(1), 'with nodes number',nproc, 'with threads number',nthreads
 
+#ifndef HAMMER
   ! write output
   call writeoutpus
+#endif
 
   deallocate(pdr)
   call MPI_FINALIZE(ierror)

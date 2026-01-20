@@ -1,8 +1,13 @@
 CMP     = intel
-OPENMP  = 1
+OPENMP  = 0
+HAMMER  = 1
 
 ifeq ($(OPENMP),1)
   DEFS_ADD += -DOPENMP
+endif
+
+ifeq ($(HAMMER),1)
+  DEFS_ADD += -DHAMMER
 endif
 
 exeName =  cd

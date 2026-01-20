@@ -71,9 +71,7 @@ do cr=0,nproc-1
       box1%max = [DBLE((cIID+1)*nxnp)*dx, DBLE((cJID+1)*nynp)*dy, DBLE((cKID+1)*nznp)*dz]
       do ipix=0,nrays-1
          epray = 0
-         projected(:,1) = sI
-         projected(:,2) = sJ
-         projected(:,3) = sK
+         projected = 0
          plength = 0.D0
          call pix2ang_nest(nside, ipix, thfpix, phfpix)
          ray%origin = [xc, yc, zc]
@@ -84,7 +82,7 @@ do cr=0,nproc-1
             do ip=1,epray
                adaptive_step = plength(ip)
                pdr(sI,sJ,sK)%cd(ipix) = pdr(sI,sJ,sK)%cd(ipix) + &
-               &DBLE(temp_density(projected(ip,1)))*adaptive_step*pc
+               &DBLE(temp_density(projected(ip)))*adaptive_step*pc
             enddo
          ENDIF         
       enddo
@@ -115,5 +113,55 @@ enddo
 #endif
 
   end subroutine calc_columndens
+
+  !hammermap only for single node
+  subroutine calc_hammermap(GI,GJ,GK)
+   implicit none
+   integer, intent(IN) :: GI,GJ,GK
+
+   !locals
+   real(RK) :: xc,yc,zc,adaptive_step
+   real(RK) :: single_cd(0:nrays-1)
+   integer :: ip,nUnit
+
+   single_cd = 0.D0
+   xc=(real(GI,kind=RK)-0.5D0)*dx
+   yc=(real(GJ,kind=RK)-0.5D0)*dy
+   zc=(real(GK,kind=RK)-0.5D0)*dz
+! #ifdef OPENMP
+! !$OMP PARALLEL DO DEFAULT(SHARED) PRIVATE(adaptive_step, box1) &
+! !$OMP PRIVATE(thfpix, phfpix, ray, epray, projected, plength)
+! #endif
+   do ipix=0,nrays-1
+      box1%min = [0.D0, 0.D0, 0.D0]
+      box1%max = [xlx, yly, zlz]
+      epray = 0
+      projected = 0
+      plength = 0.D0
+      call pix2ang_nest(nside, ipix, thfpix, phfpix)
+      ray%origin = [xc, yc, zc]
+      ray%angle = [thfpix, phfpix]
+      call RayTheia_Linear_DDA(ray, box1, n_linear_leaves, LinearCodes, LinearLevels, ipix, &
+                              epray, projected, plength)
+      IF (epray.GT.0) THEN
+      do ip=1,epray
+         adaptive_step = plength(ip)
+         single_cd(ipix) = single_cd(ipix) + &
+               &DBLE(LinearDensity(projected(ip)))*adaptive_step*pc
+      enddo
+      ENDIF
+   enddo
+! #ifdef OPENMP
+! !$OMP END PARALLEL DO
+! #endif
+
+   open(newunit=nUnit, file=trim(adjustl(outdir))//'/cdMaps.dat', status='replace')
+   do ipix=0,nrays-1
+      call pix2ang_nest(nside,ipix,thfpix,phfpix)
+      write(nUnit,*) thfpix,phfpix,single_cd(ipix)
+   enddo
+   close(nUnit)
+
+  end subroutine calc_hammermap
 
 end module m_calc_columndens

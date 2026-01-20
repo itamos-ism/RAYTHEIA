@@ -398,7 +398,7 @@ subroutine RayTheia_Linear_DDA(ray, current_box, n_tree_nodes, temp_codes, temp_
         integer, intent(in) :: temp_levels(n_linear_leaves_max)
         integer, intent(in) :: ipix
         integer, intent(inout) :: epray
-        integer, intent(inout) :: projected(0:maxpoints,3)
+        integer, intent(inout) :: projected(0:maxpoints)
         real(RK), intent(inout) :: plength(0:maxpoints)
 
         ! locals
@@ -514,7 +514,7 @@ subroutine RayTheia_Linear_DDA(ray, current_box, n_tree_nodes, temp_codes, temp_
                 ! F. 记录
                 epray = epray + 1
                 id = epray
-                projected(id,1) = idx
+                projected(id) = idx
                 plength(id) = node_len             
                 
                 ! G. 推进
