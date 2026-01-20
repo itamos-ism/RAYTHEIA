@@ -45,12 +45,12 @@ do cr=0,nproc-1
 
    temp_codes = LinearCodes
    temp_levels = LinearLevels
-   temp_density = LinearDensity
+   temp_density = real(LinearDensity)
    call MPI_Bcast(temp_codes, n_linear_leaves_all(cr), MPI_INTEGER8, &
                    cr, MPI_COMM_WORLD, ierror)
    call MPI_Bcast(temp_levels, n_linear_leaves_all(cr), MPI_INTEGER, &
                    cr, MPI_COMM_WORLD, ierror)
-   call MPI_Bcast(temp_density, n_linear_leaves_all(cr), MPI_DOUBLE_PRECISION, &
+   call MPI_Bcast(temp_density, n_linear_leaves_all(cr), MPI_REAL, &
                    cr, MPI_COMM_WORLD, ierror)
 
 #ifdef OPENMP

@@ -89,22 +89,22 @@ contains
     end do
 
     ! only can be used when direction is strict unit vector
-    ! if(tmin <= tmax) then
-    !     length = tmax -tmin
-    ! else
-    !     length = 0.D0
-    ! endif
+    if(tmin <= tmax) then
+        length = tmax -tmin
+    else
+        length = 0.D0
+    endif
 
     ! 判断射线是否与盒子相交
-    if (tmin <= tmax) then
-        ! 计算交点坐标
-        Pmin = ray_xyz%origin + tmin / ray_xyz%dir_inv
-        Pmax = ray_xyz%origin + tmax / ray_xyz%dir_inv
-        distance = sum((Pmax - Pmin)**2)
-        length = sqrt(distance)
-    else
-        length = 0.0  ! 如果不相交，长度为 0
-    end if
+    ! if (tmin <= tmax) then
+    !     ! 计算交点坐标
+    !     Pmin = ray_xyz%origin + tmin / ray_xyz%dir_inv
+    !     Pmax = ray_xyz%origin + tmax / ray_xyz%dir_inv
+    !     distance = sum((Pmax - Pmin)**2)
+    !     length = sqrt(distance)
+    ! else
+    !     length = 0.0  ! 如果不相交，长度为 0
+    ! end if
 
     end subroutine intersections
 
