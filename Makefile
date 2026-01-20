@@ -1,5 +1,5 @@
 CMP     = intel
-OPENMP  = 0
+OPENMP  = 1
 HAMMER  = 1
 
 ifeq ($(OPENMP),1)
