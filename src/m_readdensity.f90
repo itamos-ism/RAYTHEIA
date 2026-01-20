@@ -149,45 +149,54 @@ contains
     ! block
     !     type(HEALPix_ray) :: test_ray
     !     real(RK) :: total_len_local, total_len_global, expected_len
-    !     real(RK) :: dx_domain, dy_domain, dz_domain
-    !     integer :: i, cr
+    !     real(RK) :: dx_domain, dy_domain, dz_domain, adaptive_step
+    !     integer :: i, cr, cIID, cJID, cKID, ip, ierr
         
     !     ! 临时定义 DDA 输出数组 (假设只测试 1 条光线)
-    !     integer :: test_epray(0:nrays-1)
-    !     integer :: test_projected(0:nrays-1,0:maxpoints,3)
-    !     real(RK) :: test_plength(0:nrays-1,0:maxpoints)
+    !     integer :: test_epray
+    !     integer :: test_projected(0:maxpoints,3)
+    !     real(RK) :: test_plength(0:maxpoints)
+    !     integer(i8b) :: temp_codes(n_linear_leaves_max)
+    !     integer :: temp_levels(n_linear_leaves_max)
+
         
     !     test_ray%origin = [0.0_RK, 0.0_RK, 0.0_RK]
     !     test_ray%angle(1) = acos(1.0_RK / sqrt(3.0_RK))
     !     test_ray%angle(2) = 0.785398163397448_RK
 
+    !     total_len_global = 0.0_RK
     !     do cr=0,nproc-1
+    !       cKID = cr / npx / npy
+    !       cJID = (cr - cKID * npx * npy) / npx
+    !       cIID =  cr - cKID * npx * npy - cJID * npx
+
+    !       temp_codes = LinearCodes
+    !       temp_levels = LinearLevels
+
+    !       call MPI_Bcast(temp_codes, n_linear_leaves_all(cr), MPI_INTEGER8, &
+    !                cr, MPI_COMM_WORLD, ierr)
+    !       call MPI_Bcast(temp_levels, n_linear_leaves_all(cr), MPI_INTEGER, &
+    !                cr, MPI_COMM_WORLD, ierr)
+
     !       ! 初始化
-    !       box1%min = [DBLE(IID*nxnp)*dx, DBLE(JID*nynp)*dy, DBLE(KID*nznp)*dz]
-    !       box1%max = [DBLE((IID+1)*nxnp)*dx, DBLE((JID+1)*nynp)*dy, DBLE((KID+1)*nznp)*dz]
+    !       box1%min = [DBLE(cIID*nxnp)*dx, DBLE(cJID*nynp)*dy, DBLE(cKID*nznp)*dz]
+    !       box1%max = [DBLE((cIID+1)*nxnp)*dx, DBLE((cJID+1)*nynp)*dy, DBLE((cKID+1)*nznp)*dz]
     !       test_epray = 0
     !       test_projected = 0
     !       test_plength = 0.D0
           
     !       ! 2. 调用 DDA 算法
-    !       ! 注意：传入 n_linear_leaves 表示使用当前构建好的本地树
-    !       call RayTheia_Linear_DDA(test_ray, box1, n_linear_leaves, 0, &
+    !       call RayTheia_Linear_DDA(test_ray, box1, n_linear_leaves_all(cr), temp_codes, temp_levels, 0, &
     !                               test_epray, test_projected, test_plength)
+    !       IF (test_epray.GT.0) THEN
+    !           do ip=1,test_epray
+    !             adaptive_step = test_plength(ip)
+    !             total_len_global = total_len_global + adaptive_step
+    !           enddo
+    !       ENDIF           
     !     enddo
-
-    !     ! 3. 统计本进程(Rank)内的路径总长
-    !     total_len_local = 0.0_RK
-    !     if (test_epray(0) > 0) then
-    !         do i = 1, test_epray(0)
-    !             total_len_local = total_len_local + test_plength(0, i)
-    !         end do
-    !     endif
-    !     print*, nrank, total_len_local
-
-    !     call MPI_Reduce(total_len_local, total_len_global, 1, &
-    !                     MPI_DOUBLE_PRECISION, MPI_SUM, 0, MPI_COMM_WORLD, ierror)
         
-    !     ! 5. 输出验证结果 (仅 Rank 0)
+    !     ! 3. 输出验证结果 (仅 Rank 0)
     !     if (nrank == 0) then
     !         ! 计算理论长度: sqrt(Lx^2 + Ly^2 + Lz^2)
     !         ! 假设 xlx, yly, zlz 是全局物理尺寸变量
@@ -199,7 +208,6 @@ contains
     !         print *
     !         print *, "========== DDA Verification =========="
     !         print *, "Test Ray      : Diagonal (0,0,0) -> (L,L,L)"
-    !         print *, "Total Segments: ", sum(test_epray) ! 此时只统计了Rank0的，若需全局需Reduce epray
     !         print *, "Computed Len  : ", total_len_global
     !         print *, "Expected Len  : ", expected_len
     !         print *, "Abs Error     : ", abs(total_len_global - expected_len)
@@ -237,6 +245,8 @@ contains
 #ifdef AMR
     max_nodes = (8**(levels) - 1) / 7
     allocate(tree(max_nodes))
+    allocate(plength(0:maxpoints))
+    allocate(projected(0:maxpoints,3))    
     ! print*,nrank,levels,max_nodes
 #else
     allocate(plength(0:maxpoints))

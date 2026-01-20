@@ -458,7 +458,7 @@ contains
         allocate(LinearCodes(max_possible_nodes))
         allocate(LinearDensity(max_possible_nodes))
         allocate(LinearLevels(max_possible_nodes))
-        allocate(n_linear_leaves_all(nproc))
+        allocate(n_linear_leaves_all(0:nproc-1))
         
         n_linear_leaves = 0
         max_dim = max(nxnp, max(nynp, nznp))
@@ -601,14 +601,17 @@ contains
 !#################################################
 !    DDA ray traversal based on linear octree    !
 !#################################################
-subroutine RayTheia_Linear_DDA(ray, current_box, n_tree_nodes, ipix, epray, projected, plength)
+subroutine RayTheia_Linear_DDA(ray, current_box, n_tree_nodes, temp_codes, temp_levels, ipix, epray, projected, plength)
         implicit none
         type(HEALPix_ray), intent(in) :: ray
         type(box), intent(in) :: current_box
         integer, intent(in) :: n_tree_nodes
+        integer(i8b), intent(in) :: temp_codes(n_linear_leaves_max)
+        integer, intent(in) :: temp_levels(n_linear_leaves_max)
         integer, intent(in) :: ipix
-        integer, intent(out) :: epray(0:nrays-1), projected(0:nrays-1,0:maxpoints,3)
-        real(RK), intent(out) :: plength(0:nrays-1,0:maxpoints)
+        integer, intent(inout) :: epray
+        integer, intent(inout) :: projected(0:maxpoints,3)
+        real(RK), intent(inout) :: plength(0:maxpoints)
 
         ! locals
         type(slab) :: ray_xyz
@@ -687,13 +690,13 @@ subroutine RayTheia_Linear_DDA(ray, current_box, n_tree_nodes, ipix, epray, proj
             
             ! C. 生成局部 Morton 码并查表
             search_code = EncodeMorton3D(lx, ly, lz)
-            call FindLeafIndex(search_code, n_tree_nodes, idx)
+            call FindLeafIndex(search_code, n_tree_nodes, temp_codes, idx)
             
             if (idx > 0) then
                 ! === 命中局部AMR节点 ===
                 ! D. 构建该节点的 全局物理包围盒 (node_box)
-                lvl = LinearLevels(idx)
-                call DecodeMorton3D(LinearCodes(idx), node_lx, node_ly, node_lz)
+                lvl = temp_levels(idx)
+                call DecodeMorton3D(temp_codes(idx), node_lx, node_ly, node_lz)
                 ! 1. 计算节点大小 (物理单位)
                 node_grid_size = ishft(1, max_tree_level - lvl) 
                 
@@ -721,10 +724,10 @@ subroutine RayTheia_Linear_DDA(ray, current_box, n_tree_nodes, ipix, epray, proj
                 end if
                 
                 ! F. 记录
-                epray(ipix) = epray(ipix) + 1
-                id = epray(ipix)
-                projected(ipix,id,1) = idx
-                plength(ipix, id) = node_len             
+                epray = epray + 1
+                id = epray
+                projected(id,1) = idx
+                plength(id) = node_len             
                 
                 ! G. 推进
                 t_curr = t_next
@@ -745,9 +748,10 @@ subroutine RayTheia_Linear_DDA(ray, current_box, n_tree_nodes, ipix, epray, proj
     end subroutine RayTheia_Linear_DDA
     
     ! Binary search leaf nodes
-    subroutine FindLeafIndex(key, n_search_size, idx)
+    subroutine FindLeafIndex(key, n_search_size, temp_codes, idx)
         integer(i8b), intent(in) :: key
         integer, intent(in) :: n_search_size
+        integer(i8b), intent(in) :: temp_codes(n_linear_leaves_max)
         integer, intent(out) :: idx
 
         ! locals
@@ -763,7 +767,7 @@ subroutine RayTheia_Linear_DDA(ray, current_box, n_tree_nodes, ipix, epray, proj
         ! 查找满足 LinearCodes(i) <= key 的最大索引
         do while (left <= right)
             mid = (left + right) / 2
-            code_mid = LinearCodes(mid)
+            code_mid = temp_codes(mid)
             if (code_mid <= key) then
                 idx = mid
                 left = mid + 1
